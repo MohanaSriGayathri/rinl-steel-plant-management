@@ -1,4 +1,12 @@
-import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  useCallback
+} from 'react';
+
 import { User, AuthError } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { UserProfile } from '../types';
@@ -8,8 +16,16 @@ interface AuthContextType {
   userProfile: UserProfile | null;
   loading: boolean;
   currentSessionId: string | null;
-  signUp: (employeeId: string, email: string, password: string, role: string) => Promise<{ error: Error | AuthError | null }>;
-  signIn: (email: string, password: string) => Promise<{ error: Error | AuthError | null }>;
+  signUp: (
+    employeeId: string,
+    email: string,
+    password: string,
+    role: string
+  ) => Promise<{ error: Error | AuthError | null }>;
+  signIn: (
+    email: string,
+    password: string
+  ) => Promise<{ error: Error | AuthError | null }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
@@ -18,13 +34,19 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function useAuth() {
   const context = useContext(AuthContext);
-  if (context === undefined) {
+
+  if (!context) {
     throw new Error('useAuth must be used within an AuthProvider');
   }
+
   return context;
 }
 
-export function AuthProvider({ children }: { children: React.ReactNode }) {
+export function AuthProvider({
+  children
+}: {
+  children: React.ReactNode;
+}) {
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -33,89 +55,162 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const currentSessionIdRef = useRef<string | null>(null);
   currentSessionIdRef.current = currentSessionId;
 
-  const fetchUserProfile = useCallback(async (authUser: User): Promise<UserProfile | null> => {
-    try {
-      const { data, error } = await supabase
-        .from('users')
-        .select('id, employee_id, role, email, created_at, last_login, login_count')
-        .eq('id', authUser.id)
-        .maybeSingle();
-
-      if (error) {
-        console.warn('AuthContext: Could not fetch user profile from DB:', error.message);
-      }
-
-      if (data) {
-        setUserProfile(data as UserProfile);
-        return data as UserProfile;
-      }
-
-      // If profile does not exist in public.users yet, build fallback from auth metadata
-      const fallback: UserProfile = {
-        id: authUser.id,
-        employee_id: authUser.user_metadata?.employee_id || (authUser.email ? authUser.email.split('@')[0] : 'EMP001'),
-        role: authUser.user_metadata?.role || 'employee',
-        email: authUser.email || '',
-        created_at: authUser.created_at || new Date().toISOString()
-      };
-
-      setUserProfile(fallback);
-
-      // Attempt non-blocking profile creation
+  // Fetch the profile and report database errors accurately.
+  const fetchUserProfile = useCallback(
+    async (authUser: User): Promise<UserProfile | null> => {
       try {
-        await supabase
+        const { data, error } = await supabase
           .from('users')
-          .upsert([
+          .select('id, employee_id, role, email, created_at')
+          .eq('id', authUser.id)
+          .maybeSingle();
+
+        if (error) {
+          console.error(
+            'AuthContext: Profile read failed:',
+            error.message,
+            error.code,
+            error.details,
+            error.hint
+          );
+
+          // Keep a temporary profile for the current UI session.
+          const fallback: UserProfile = {
+            id: authUser.id,
+            employee_id:
+              authUser.user_metadata?.employee_id ||
+              authUser.email?.split('@')[0] ||
+              'EMP001',
+            role: authUser.user_metadata?.role || 'employee',
+            email: authUser.email || '',
+            created_at: authUser.created_at || new Date().toISOString()
+          };
+
+          setUserProfile(fallback);
+          return fallback;
+        }
+
+        if (data) {
+          setUserProfile(data as UserProfile);
+          return data as UserProfile;
+        }
+
+        // No database profile exists. Build a temporary fallback.
+        const fallback: UserProfile = {
+          id: authUser.id,
+          employee_id:
+            authUser.user_metadata?.employee_id ||
+            authUser.email?.split('@')[0] ||
+            'EMP001',
+          role: authUser.user_metadata?.role || 'employee',
+          email: authUser.email || '',
+          created_at: authUser.created_at || new Date().toISOString()
+        };
+
+        setUserProfile(fallback);
+
+        // Attempt to create the missing profile and CHECK the returned error.
+        const { error: insertError } = await supabase
+          .from('users')
+          .upsert(
             {
               id: fallback.id,
               employee_id: fallback.employee_id,
               role: fallback.role,
               email: fallback.email,
               created_at: fallback.created_at
-            }
-          ], { onConflict: 'id' });
-      } catch (insertErr) {
-        console.warn('AuthContext: Could not upsert fallback profile:', insertErr);
+            },
+            { onConflict: 'id' }
+          );
+
+        if (insertError) {
+          console.error(
+            'AuthContext: Profile upsert failed:',
+            insertError.message,
+            insertError.code,
+            insertError.details,
+            insertError.hint
+          );
+        } else {
+          console.info('AuthContext: Profile upsert succeeded.');
+
+          // Confirm that the profile was actually saved.
+          const { data: savedProfile, error: verifyError } = await supabase
+            .from('users')
+            .select('id, employee_id, role, email, created_at')
+            .eq('id', authUser.id)
+            .maybeSingle();
+
+          if (verifyError) {
+            console.error(
+              'AuthContext: Profile verification failed:',
+              verifyError.message
+            );
+          } else if (savedProfile) {
+            setUserProfile(savedProfile as UserProfile);
+            return savedProfile as UserProfile;
+          } else {
+            console.warn(
+              'AuthContext: Upsert returned no error, but no profile was visible afterward.'
+            );
+          }
+        }
+
+        // Keep the fallback so the UI can continue to function.
+        return fallback;
+      } catch (err) {
+        console.error(
+          'AuthContext: Unexpected profile error:',
+          err
+        );
+        return null;
       }
+    },
+    []
+  );
 
-      return fallback;
-    } catch (err) {
-      console.error('AuthContext: Unexpected error in fetchUserProfile:', err);
-      return null;
-    }
-  }, []);
+  const logUserLogin = useCallback(
+    async (userId: string, role?: string) => {
+      try {
+        const { data, error } = await supabase.rpc('log_user_login', {
+          p_user_id: userId,
+          p_role: role || 'employee',
+          p_ip_address: null,
+          p_user_agent:
+            typeof navigator !== 'undefined'
+              ? navigator.userAgent
+              : null
+        });
 
-  const logUserLogin = useCallback(async (userId: string, role?: string) => {
-    try {
-      const effectiveRole = role || 'employee';
-      const { data, error } = await supabase.rpc('log_user_login', {
-        p_user_id: userId,
-        p_role: effectiveRole,
-        p_ip_address: null,
-        p_user_agent: typeof navigator !== 'undefined' ? navigator.userAgent : null
-      });
-
-      if (error) {
-        // RPC might not exist yet in database
-        console.warn('AuthContext: log_user_login RPC not available or failed:', error.message);
-      } else if (data) {
-        setCurrentSessionId(String(data));
+        if (error) 
+        {
+          console.warn(
+            'AuthContext: log_user_login failed:',
+            error.message
+          );
+        } 
+      } catch (err)
+     {
+        console.warn('AuthContext: Login logging error:', err);
       }
-    } catch (err) {
-      console.warn('AuthContext: Error invoking log_user_login RPC:', err);
-    }
-  }, []);
+    },
+    []
+  );
 
   const logUserLogout = useCallback(async (sessionId: string) => {
     try {
       const { error } = await supabase.rpc('log_user_logout', {
         p_session_id: sessionId
       });
+
       if (error) {
-        console.warn('AuthContext: log_user_logout RPC not available or failed:', error.message);
+        console.warn(
+          'AuthContext: log_user_logout failed:',
+          error.message
+        );
       }
     } catch (err) {
-      console.warn('AuthContext: Error invoking log_user_logout RPC:', err);
+      console.warn('AuthContext: Logout logging error:', err);
     }
   }, []);
 
@@ -128,36 +223,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let mounted = true;
 
-    // Safety timeout: Never leave auth in an infinite loading state
     const safetyTimer = setTimeout(() => {
       if (mounted) {
-        setLoading((prev) => {
-          if (prev) {
-            console.warn('AuthContext: Safety timeout reached, resolving auth loading state.');
-            return false;
-          }
-          return prev;
-        });
+        setLoading(false);
       }
-    }, 4000);
+    }, 8000);
 
     const getInitialSession = async () => {
       try {
-        const { data: { session }, error } = await supabase.auth.getSession();
+        const {
+          data: { session },
+          error
+        } = await supabase.auth.getSession();
+
         if (error) {
-          console.error('AuthContext: Error getting initial session:', error);
+          console.error(
+            'AuthContext: Initial session error:',
+            error.message
+          );
         }
 
-        if (mounted) {
-          const initialUser = session?.user ?? null;
-          setUser(initialUser);
+        if (!mounted) return;
 
-          if (initialUser) {
-            await fetchUserProfile(initialUser);
-          }
+        const initialUser = session?.user ?? null;
+        setUser(initialUser);
+
+        if (initialUser) {
+          await fetchUserProfile(initialUser);
         }
       } catch (err) {
-        console.error('AuthContext: Error in getInitialSession:', err);
+        console.error(
+          'AuthContext: Could not get initial session:',
+          err
+        );
       } finally {
         if (mounted) {
           setLoading(false);
@@ -166,24 +264,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     };
 
-    getInitialSession();
+    void getInitialSession();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+    const {
+      data: { subscription }
+    } = supabase.auth.onAuthStateChange((event, session) => {
       if (!mounted) return;
 
       const currentUser = session?.user ?? null;
+
       setUser(currentUser);
 
       if (currentUser) {
-        const profile = await fetchUserProfile(currentUser);
-        if (event === 'SIGNED_IN') {
-          await logUserLogin(currentUser.id, profile?.role);
-        }
+        // Defer database work until the auth callback has returned.
+        setTimeout(() => {
+          if (!mounted) return;
+
+          void (async () => {
+            const profile = await fetchUserProfile(currentUser);
+
+            if (mounted && event === 'SIGNED_IN') {
+              await logUserLogin(currentUser.id, profile?.role);
+            }
+          })();
+        }, 0);
       } else {
         setUserProfile(null);
-        if (currentSessionIdRef.current && event === 'SIGNED_OUT') {
-          await logUserLogout(currentSessionIdRef.current);
-          setCurrentSessionId(null);
+
+        const previousSessionId = currentSessionIdRef.current;
+
+        setCurrentSessionId(null);
+
+        if (previousSessionId && event === 'SIGNED_OUT') {
+          void logUserLogout(previousSessionId);
         }
       }
 
@@ -197,72 +310,68 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [fetchUserProfile, logUserLogin, logUserLogout]);
 
-  const signUp = async (employeeId: string, email: string, password: string, role: string) => {
-    try {
-      // 1. Check if an account with this employee_id or email already exists in public table
-      try {
-        const { data: existingUser } = await supabase
-          .from('users')
-          .select('email, employee_id')
-          .or(`email.eq.${email},employee_id.eq.${employeeId}`)
-          .maybeSingle();
+  
+const signUp = async (
+  employeeId: string,
+  email: string,
+  password: string,
+  role: string
+): Promise<{ error: Error | AuthError | null }> => {
+  try {
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedEmployeeId = employeeId.trim();
+    const requestedRole = role.trim().toLowerCase();
 
-        if (existingUser) {
-          const errorMsg = existingUser.email === email
-            ? 'An account with this email already exists'
-            : 'An account with this employee ID already exists';
-          return { error: new Error(errorMsg) };
-        }
-      } catch {
-        // Table might be protected by RLS or not populated; proceed to Supabase Auth
-      }
-
-      // 2. Register user through Supabase Auth (pass employee_id and role as user metadata)
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: {
-            employee_id: employeeId,
-            role: role
-          }
-        }
-      });
-
-      if (authError) {
-        return { error: authError };
-      }
-
-      // 3. Create or update profile in public.users table WITHOUT plaintext password
-      if (authData.user) {
-        const { error: profileError } = await supabase
-          .from('users')
-          .upsert([
-            {
-              id: authData.user.id,
-              employee_id: employeeId,
-              role: role,
-              email: email,
-              created_at: new Date().toISOString()
-            }
-          ], { onConflict: 'id' });
-
-        if (profileError) {
-          console.warn('AuthContext: Profile upsert returned notice (trigger will handle if configured):', profileError.message);
-        }
-      }
-
-      return { error: null };
-    } catch (err: unknown) {
-      console.error('AuthContext: SignUp exception:', err);
-      return { error: err instanceof Error ? err : new Error(String(err)) };
+    if (!['supervisor', 'vendor'].includes(requestedRole)) {
+      return {
+        error: new Error('Please select Supervisor or Vendor.')
+      };
     }
-  };
 
-  const signIn = async (email: string, password: string) => {
+    if (!normalizedEmployeeId) {
+      return {
+        error: new Error('Employee ID is required.')
+      };
+    }
+
+    const { error } = await supabase.auth.signUp({
+      email: normalizedEmail,
+      password,
+      options: {
+        emailRedirectTo: `${window.location.origin}/`,
+        data: {
+          employee_id: normalizedEmployeeId,
+          role: requestedRole
+        }
+      }
+    });
+
+    if (error) {
+      return { error };
+    }
+
+    // The database trigger creates the profile automatically.
+    // Email confirmation can remain enabled; no active session
+    // is required to create the profile.
+    return { error: null };
+  } catch (err: unknown) {
+    console.error('AuthContext: Signup exception:', err);
+
+    return {
+      error: err instanceof Error
+        ? err
+        : new Error(String(err))
+    };
+  }
+};
+
+  const signIn = async (
+    email: string,
+    password: string
+  ): Promise<{ error: Error | AuthError | null }> => {
     try {
       const { error } = await supabase.auth.signInWithPassword({
-        email,
+        email: email.trim().toLowerCase(),
         password
       });
 
@@ -272,29 +381,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       return { error: null };
     } catch (err: unknown) {
-      console.error('AuthContext: SignIn exception:', err);
-      return { error: err instanceof Error ? err : new Error(String(err)) };
+      console.error('AuthContext: Signin exception:', err);
+
+      return {
+        error: err instanceof Error ? err : new Error(String(err))
+      };
     }
   };
 
-  const signOut = async () => {
+  const signOut = async (): Promise<void> => {
     try {
-      if (currentSessionIdRef.current) {
-        await logUserLogout(currentSessionIdRef.current);
+      const sessionId = currentSessionIdRef.current;
+
+      setUser(null);
+      setUserProfile(null);
+      setCurrentSessionId(null);
+
+      const { error } = await supabase.auth.signOut();
+
+      if (error) {
+        console.error(
+          'AuthContext: Supabase signout failed:',
+          error.message
+        );
       }
-      setUser(null);
-      setUserProfile(null);
-      setCurrentSessionId(null);
-      await supabase.auth.signOut();
+
+      if (sessionId) {
+        await logUserLogout(sessionId);
+      }
     } catch (err) {
-      console.error('AuthContext: Error during signOut:', err);
-      setUser(null);
-      setUserProfile(null);
-      setCurrentSessionId(null);
+      console.error('AuthContext: Signout exception:', err);
     }
   };
 
-  const value = {
+  const value: AuthContextType = {
     user,
     userProfile,
     loading,

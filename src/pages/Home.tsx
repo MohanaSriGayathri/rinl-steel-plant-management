@@ -39,13 +39,13 @@ const Home = () => {
     },
     {
       name: 'MetalWorks International',
-      image: 'https://images.pexels.com/photos/1108630/pexels-photo-1108630.jpeg?auto=compress&cs=tinysrgb&w=400&h=300&fit=crop',
+      image: 'https://images.pexels.com/photos/259984/pexels-photo-259984.jpeg?auto=compress&cs=tinysrgb&w=400&h=300&fit=crop',
       contact: '+1 (555) 987-6543'
     },
     {
       name: 'Steel Dynamics Ltd',
-      image: 'https://images.pexels.com/photos/162568/steel-mill-factory-industry-162568.jpeg?auto=compress&cs=tinysrgb&w=400&h=300&fit=crop',
-      contact: '+1 (555) 456-7890'
+      image: 'https://images.pexels.com/photos/1108101/pexels-photo-1108101.jpeg?auto=compress&cs=tinysrgb&w=400&h=300&fit=crop',
+      contact: '+1 (555) 555-5555'  
     }
   ];
 
